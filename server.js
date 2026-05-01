@@ -1,13 +1,8 @@
 const http = require('http');
 const https = require('https');
 
-// ── SOL SENTINEL TRADING SERVER ──────────────────────
-// Signs and broadcasts Solana transactions server-side
-// Deploy on Railway.app - $5/month
-
 const PORT = process.env.PORT || 3000;
 
-// Helper: make HTTPS request
 function httpsPost(hostname, path, data) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(data);
@@ -33,8 +28,7 @@ function httpsPost(hostname, path, data) {
   });
 }
 
-// Helper: CORS headers
-function corsHeaders() {
+function cors() {
   return {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -43,141 +37,106 @@ function corsHeaders() {
   };
 }
 
-// Main server
 const server = http.createServer(async (req, res) => {
-  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
-    res.writeHead(200, corsHeaders());
+    res.writeHead(200, cors());
     res.end();
     return;
   }
 
   // Health check
-  if (req.method === 'GET' && req.url === '/') {
-    res.writeHead(200, corsHeaders());
-    res.end(JSON.stringify({ 
-      status: 'SOL SENTINEL SERVER ONLINE',
-      version: '1.0',
-      time: new Date().toISOString()
-    }));
+  if (req.method === 'GET') {
+    res.writeHead(200, cors());
+    res.end(JSON.stringify({ status: 'SOL SENTINEL SERVER ONLINE', version: '1.0' }));
     return;
   }
 
-  // Sign and broadcast transaction
-  if (req.method === 'POST' && req.url === '/broadcast') {
-    let body = '';
-    req.on('data', d => body += d);
-    req.on('end', async () => {
-      try {
-        const { transaction, seed } = JSON.parse(body);
-        
-        if (!transaction) throw new Error('No transaction provided');
-        if (!seed) throw new Error('No seed provided');
+  let body = '';
+  req.on('data', d => body += d);
+  req.on('end', async () => {
+    try {
+      const data = JSON.parse(body || '{}');
 
-        // Load nacl
+      // Broadcast signed transaction
+      if (req.url === '/broadcast') {
+        const { transaction, seed } = data;
+        if (!transaction) throw new Error('No transaction');
+        if (!seed) throw new Error('No seed');
+
         const nacl = require('tweetnacl');
-        
-        // Decode seed from hex
         const seedBytes = Buffer.from(seed, 'hex');
         if (seedBytes.length !== 32) throw new Error('Seed must be 32 bytes');
-        
-        // Generate keypair
         const keypair = nacl.sign.keyPair.fromSeed(seedBytes);
-        
-        // Decode transaction
         const txBytes = Buffer.from(transaction, 'base64');
-        
-        // Determine transaction format and sign
+
+        // Sign the transaction
         let signed;
-        const firstByte = txBytes[0];
-        
-        if (firstByte === 0x80 || firstByte >= 0x80) {
-          // Versioned transaction (v0)
-          // Format: [version(1)][numSigs(1)][sig1(64)...][message...]
+        if (txBytes[0] >= 0x80) {
+          // Versioned transaction
           const numSigs = txBytes[1];
-          const messageOffset = 1 + 1 + (64 * numSigs);
-          const message = txBytes.slice(messageOffset);
+          const msgStart = 1 + 1 + (64 * numSigs);
+          const message = txBytes.slice(msgStart);
           const sig = nacl.sign.detached(message, keypair.secretKey);
           signed = Buffer.from(txBytes);
-          sig.copy(signed, 2); // write first signature after version+numSigs
+          sig.copy(signed, 2);
         } else {
           // Legacy transaction
-          // Format: [numSigs(1)][sig1(64)...][message...]
           const numSigs = txBytes[0];
-          const messageOffset = 1 + (64 * numSigs);
-          const message = txBytes.slice(messageOffset);
+          const msgStart = 1 + (64 * numSigs);
+          const message = txBytes.slice(msgStart);
           const sig = nacl.sign.detached(message, keypair.secretKey);
           signed = Buffer.from(txBytes);
           sig.copy(signed, 1);
         }
-        
-        const signedB64 = signed.toString('base64');
-        
-        // Broadcast to Solana mainnet
+
         const result = await httpsPost('api.mainnet-beta.solana.com', '/', {
-          jsonrpc: '2.0',
-          id: 1,
+          jsonrpc: '2.0', id: 1,
           method: 'sendTransaction',
-          params: [signedB64, {
+          params: [signed.toString('base64'), {
             encoding: 'base64',
             skipPreflight: true,
-            maxRetries: 3,
-            preflightCommitment: 'confirmed'
+            maxRetries: 3
           }]
         });
-        
-        res.writeHead(200, corsHeaders());
-        res.end(JSON.stringify(result));
-        
-      } catch(e) {
-        res.writeHead(500, corsHeaders());
-        res.end(JSON.stringify({ error: e.message }));
-      }
-    });
-    return;
-  }
 
-  // Jupiter quote proxy
-  if (req.method === 'GET' && req.url.startsWith('/quote')) {
-    try {
-      const params = req.url.replace('/quote', '');
-      const result = await new Promise((resolve, reject) => {
-        https.get('https://lite-api.jup.ag/swap/v1/quote' + params, (r) => {
-          let raw = '';
-          r.on('data', d => raw += d);
-          r.on('end', () => resolve(JSON.parse(raw)));
-        }).on('error', reject);
-      });
-      res.writeHead(200, corsHeaders());
-      res.end(JSON.stringify(result));
+        res.writeHead(200, cors());
+        res.end(JSON.stringify(result));
+        return;
+      }
+
+      // Jupiter quote proxy
+      if (req.url.startsWith('/quote')) {
+        const params = req.url.replace('/quote', '');
+        const result = await new Promise((resolve, reject) => {
+          https.get('https://lite-api.jup.ag/swap/v1/quote' + params, (r) => {
+            let raw = '';
+            r.on('data', d => raw += d);
+            r.on('end', () => { try { resolve(JSON.parse(raw)); } catch(e) { resolve({error: raw}); } });
+          }).on('error', reject);
+        });
+        res.writeHead(200, cors());
+        res.end(JSON.stringify(result));
+        return;
+      }
+
+      // Jupiter swap proxy
+      if (req.url === '/swap') {
+        const result = await httpsPost('lite-api.jup.ag', '/swap/v1/swap', data);
+        res.writeHead(200, cors());
+        res.end(JSON.stringify(result));
+        return;
+      }
+
+      res.writeHead(404, cors());
+      res.end(JSON.stringify({ error: 'Not found' }));
+
     } catch(e) {
-      res.writeHead(500, corsHeaders());
+      res.writeHead(500, cors());
       res.end(JSON.stringify({ error: e.message }));
     }
-    return;
-  }
-
-  // Jupiter swap proxy  
-  if (req.method === 'POST' && req.url === '/swap') {
-    let body = '';
-    req.on('data', d => body += d);
-    req.on('end', async () => {
-      try {
-        const result = await httpsPost('lite-api.jup.ag', '/swap/v1/swap', JSON.parse(body));
-        res.writeHead(200, corsHeaders());
-        res.end(JSON.stringify(result));
-      } catch(e) {
-        res.writeHead(500, corsHeaders());
-        res.end(JSON.stringify({ error: e.message }));
-      }
-    });
-    return;
-  }
-
-  res.writeHead(404, corsHeaders());
-  res.end(JSON.stringify({ error: 'Not found' }));
+  });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log('SOL SENTINEL SERVER running on port ' + PORT);
 });

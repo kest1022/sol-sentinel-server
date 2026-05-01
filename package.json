@@ -1,0 +1,12 @@
+{
+  "name": "sol-sentinel-server",
+  "version": "1.0.0",
+  "description": "SOL Sentinel Trading Server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "tweetnacl": "^1.0.3"
+  }
+}

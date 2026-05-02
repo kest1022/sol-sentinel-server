@@ -198,6 +198,26 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      // Token balance fetch
+      if (req.url === '/tokenBalance') {
+        const { address, mint } = data;
+        if (!address || !mint) throw new Error('Need address and mint');
+        const result = await httpsPost('api.mainnet-beta.solana.com', '/', {
+          jsonrpc: '2.0', id: 1,
+          method: 'getTokenAccountsByOwner',
+          params: [address, { mint }, { encoding: 'jsonParsed', commitment: 'confirmed' }]
+        });
+        let amount = 0;
+        if (result.result && result.result.value && result.result.value.length > 0) {
+          const tokenAccount = result.result.value[0];
+          amount = parseInt(tokenAccount.account.data.parsed.info.tokenAmount.amount) || 0;
+        }
+        console.log('Token balance for', mint.substring(0,8), ':', amount);
+        res.writeHead(200, cors());
+        res.end(JSON.stringify({ amount }));
+        return;
+      }
+
       // Balance fetch
       if (req.url === '/balance') {
         const { address } = data;

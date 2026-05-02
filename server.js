@@ -107,12 +107,28 @@ const server = http.createServer(async (req, res) => {
       // Jupiter quote proxy
       if (req.url.startsWith('/quote')) {
         const params = req.url.replace('/quote', '');
+        const jupUrl = 'https://lite-api.jup.ag/swap/v1/quote' + params;
+        console.log('Quote URL:', jupUrl);
         const result = await new Promise((resolve, reject) => {
-          https.get('https://lite-api.jup.ag/swap/v1/quote' + params, (r) => {
+          const options = {
+            hostname: 'lite-api.jup.ag',
+            path: '/swap/v1/quote' + params,
+            method: 'GET',
+            headers: {
+              'Accept': 'application/json',
+              'Content-Type': 'application/json'
+            }
+          };
+          const req2 = https.request(options, (r) => {
             let raw = '';
             r.on('data', d => raw += d);
-            r.on('end', () => { try { resolve(JSON.parse(raw)); } catch(e) { resolve({error: raw}); } });
-          }).on('error', reject);
+            r.on('end', () => { 
+              console.log('Quote response:', raw.substring(0,100));
+              try { resolve(JSON.parse(raw)); } catch(e) { resolve({error: raw}); } 
+            });
+          });
+          req2.on('error', reject);
+          req2.end();
         });
         res.writeHead(200, cors());
         res.end(JSON.stringify(result));
@@ -122,6 +138,20 @@ const server = http.createServer(async (req, res) => {
       // Jupiter swap proxy
       if (req.url === '/swap') {
         const result = await httpsPost('lite-api.jup.ag', '/swap/v1/swap', data);
+        res.writeHead(200, cors());
+        res.end(JSON.stringify(result));
+        return;
+      }
+
+      // Balance fetch
+      if (req.url === '/balance') {
+        const { address } = data;
+        if (!address) throw new Error('No address');
+        const result = await httpsPost('api.mainnet-beta.solana.com', '/', {
+          jsonrpc: '2.0', id: 1,
+          method: 'getBalance',
+          params: [address, {commitment: 'confirmed'}]
+        });
         res.writeHead(200, cors());
         res.end(JSON.stringify(result));
         return;

@@ -44,6 +44,29 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Quote proxy (GET)
+  if (req.method === 'GET' && req.url.startsWith('/quote')) {
+    const params = req.url.replace('/quote', '');
+    const options = {
+      hostname: 'lite-api.jup.ag',
+      path: '/swap/v1/quote' + params,
+      method: 'GET',
+      headers: {'Accept': 'application/json'}
+    };
+    const result = await new Promise((resolve, reject) => {
+      const r2 = https.request(options, (r) => {
+        let raw = '';
+        r.on('data', d => raw += d);
+        r.on('end', () => { try { resolve(JSON.parse(raw)); } catch(e) { resolve({error: raw}); }});
+      });
+      r2.on('error', reject);
+      r2.end();
+    });
+    res.writeHead(200, cors());
+    res.end(JSON.stringify(result));
+    return;
+  }
+
   // Health check
   if (req.method === 'GET') {
     res.writeHead(200, cors());
@@ -169,4 +192,3 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log('SOL SENTINEL SERVER running on port ' + PORT);
-});

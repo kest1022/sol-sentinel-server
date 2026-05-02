@@ -75,7 +75,6 @@ function toBase58(bytes) {
   return result;
 }
 
-// Try all common Solana derivation paths and return the one matching target
 async function findKeypair(mnemonic, targetAddress) {
   const bip39 = require('bip39');
   const { derivePath } = require('ed25519-hd-key');
@@ -84,32 +83,28 @@ async function findKeypair(mnemonic, targetAddress) {
   const seed = await bip39.mnemonicToSeed(mnemonic.trim());
   const seedHex = seed.toString('hex');
   
-  // All common Solana paths
-  const paths = [
-    "m/44'/501'/0'/0'",
-    "m/44'/501'/0'",
-    "m/44'/501'/1'/0'",
-    "m/44'/501'/2'/0'",
-    "m/44'/501'/0'/0'/0'",
-  ];
+  // Try many account indices
+  const paths = [];
+  for (let i = 0; i < 10; i++) {
+    paths.push(`m/44'/501'/${i}'/0'`);
+    paths.push(`m/44'/501'/${i}'`);
+  }
   
   for (const path of paths) {
     try {
       const derived = derivePath(path, seedHex);
       const kp = nacl.sign.keyPair.fromSeed(derived.key);
       const pubkey = toBase58(kp.publicKey);
-      console.log('Path:', path, '-> Pubkey:', pubkey);
       
-      if (targetAddress && pubkey === targetAddress) {
-        console.log('MATCH FOUND at path:', path);
+      if (pubkey === targetAddress) {
+        console.log('MATCH at path:', path);
         return { keypair: kp, path };
       }
-    } catch(e) {
-      console.log('Path failed:', path, e.message);
-    }
+    } catch(e) {}
   }
   
-  // If no match, use default path
+  console.log('No match found for', targetAddress);
+  // Return default
   const derived = derivePath("m/44'/501'/0'/0'", seedHex);
   const kp = nacl.sign.keyPair.fromSeed(derived.key);
   return { keypair: kp, path: "m/44'/501'/0'/0'" };
@@ -150,7 +145,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET') {
     res.writeHead(200, cors());
-    res.end(JSON.stringify({ status: 'SOL SENTINEL SERVER ONLINE', version: '4.0' }));
+    res.end(JSON.stringify({ status: 'SOL SENTINEL SERVER ONLINE', version: '5.0' }));
     return;
   }
 
@@ -160,33 +155,17 @@ const server = http.createServer(async (req, res) => {
     try {
       const data = JSON.parse(body || '{}');
 
-      // Find keypair matching wallet address
-      if (req.url === '/findPath') {
-        const { mnemonic, address } = data;
-        if (!mnemonic || !address) throw new Error('Need mnemonic and address');
-        const { keypair, path } = await findKeypair(mnemonic, address);
-        const pubkey = toBase58(keypair.publicKey);
-        res.writeHead(200, cors());
-        res.end(JSON.stringify({ pubkey, path, match: pubkey === address }));
-        return;
-      }
-
-      // Sign and broadcast
       if (req.url === '/broadcast') {
         const { transaction, mnemonic, address } = data;
         if (!transaction) throw new Error('No transaction');
         if (!mnemonic) throw new Error('No mnemonic');
 
         const nacl = require('tweetnacl');
-        
-        // Find correct keypair for this address
         const { keypair, path } = await findKeypair(mnemonic, address);
         const pubkey = toBase58(keypair.publicKey);
-        console.log('Using path:', path, 'pubkey:', pubkey, 'match:', pubkey === address);
+        console.log('Path:', path, 'match:', pubkey === address);
 
         const txBytes = Buffer.from(transaction, 'base64');
-        console.log('TX bytes:', txBytes.slice(0, 5).toString('hex'), 'len:', txBytes.length);
-
         let signed;
         const firstByte = txBytes[0];
         
@@ -218,7 +197,7 @@ const server = http.createServer(async (req, res) => {
           }]
         });
 
-        console.log('RPC:', JSON.stringify(result).substring(0, 150));
+        console.log('RPC:', JSON.stringify(result).substring(0, 100));
         res.writeHead(200, cors());
         res.end(JSON.stringify(result));
         return;
@@ -243,6 +222,16 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      // Find which path matches address
+      if (req.url === '/findPath') {
+        const { mnemonic, address } = data;
+        const { keypair, path } = await findKeypair(mnemonic, address);
+        const pubkey = toBase58(keypair.publicKey);
+        res.writeHead(200, cors());
+        res.end(JSON.stringify({ pubkey, path, match: pubkey === address }));
+        return;
+      }
+
       res.writeHead(404, cors());
       res.end(JSON.stringify({ error: 'Not found' }));
 
@@ -255,5 +244,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log('SOL SENTINEL SERVER v4.0 on port ' + PORT);
+  console.log('SOL SENTINEL SERVER v5.0 on port ' + PORT);
 });

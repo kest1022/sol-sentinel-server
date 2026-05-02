@@ -158,6 +158,29 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      // Price feed proxy
+      if (req.url.startsWith('/price')) {
+        const params = req.url.replace('/price', '');
+        const options = {
+          hostname: 'lite-api.jup.ag',
+          path: '/price/v2' + params,
+          method: 'GET',
+          headers: {'Accept': 'application/json'}
+        };
+        const result = await new Promise((resolve, reject) => {
+          const r2 = https.request(options, (r) => {
+            let raw = '';
+            r.on('data', d => raw += d);
+            r.on('end', () => { try { resolve(JSON.parse(raw)); } catch(e) { resolve({error: raw}); }});
+          });
+          r2.on('error', reject);
+          r2.end();
+        });
+        res.writeHead(200, cors());
+        res.end(JSON.stringify(result));
+        return;
+      }
+
       // Jupiter swap proxy
       if (req.url === '/swap') {
         const result = await httpsPost('lite-api.jup.ag', '/swap/v1/swap', data);

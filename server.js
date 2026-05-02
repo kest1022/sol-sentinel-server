@@ -57,6 +57,47 @@ function cors() {
   };
 }
 
+// Derive proper Solana keypair from mnemonic using BIP39/BIP44
+async function deriveKeypairFromMnemonic(mnemonic) {
+  const bip39 = require('bip39');
+  const { derivePath } = require('ed25519-hd-key');
+  const nacl = require('tweetnacl');
+  
+  // BIP39: mnemonic -> seed
+  const seed = await bip39.mnemonicToSeed(mnemonic.trim());
+  
+  // BIP44: derive Solana path m/44'/501'/0'/0'
+  const path = "m/44'/501'/0'/0'";
+  const derived = derivePath(path, seed.toString('hex'));
+  
+  // Ed25519 keypair from derived seed
+  const keypair = nacl.sign.keyPair.fromSeed(derived.key);
+  
+  return keypair;
+}
+
+// Base58 encode for Solana addresses
+function toBase58(bytes) {
+  const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  let digits = [0];
+  for (let i = 0; i < bytes.length; i++) {
+    let carry = bytes[i];
+    for (let j = 0; j < digits.length; j++) {
+      carry += digits[j] << 8;
+      digits[j] = carry % 58;
+      carry = (carry / 58) | 0;
+    }
+    while (carry > 0) {
+      digits.push(carry % 58);
+      carry = (carry / 58) | 0;
+    }
+  }
+  let result = '';
+  for (let k = 0; k < bytes.length && bytes[k] === 0; k++) result += '1';
+  for (let m = digits.length - 1; m >= 0; m--) result += ALPHABET[digits[m]];
+  return result;
+}
+
 const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(200, cors());
@@ -95,7 +136,7 @@ const server = http.createServer(async (req, res) => {
   // Health check
   if (req.method === 'GET') {
     res.writeHead(200, cors());
-    res.end(JSON.stringify({ status: 'SOL SENTINEL SERVER ONLINE', version: '2.0' }));
+    res.end(JSON.stringify({ status: 'SOL SENTINEL SERVER ONLINE', version: '3.0' }));
     return;
   }
 
@@ -105,96 +146,63 @@ const server = http.createServer(async (req, res) => {
     try {
       const data = JSON.parse(body || '{}');
 
-      // Broadcast - sign and send transaction
+      // Broadcast with proper BIP39 signing
       if (req.url === '/broadcast') {
-        const { transaction, seed } = data;
+        const { transaction, mnemonic } = data;
         if (!transaction) throw new Error('No transaction');
-        if (!seed) throw new Error('No seed');
+        if (!mnemonic) throw new Error('No mnemonic');
 
         const nacl = require('tweetnacl');
-        const seedBytes = Buffer.from(seed, 'hex');
-        if (seedBytes.length !== 32) throw new Error('Seed must be 32 bytes');
         
-        const keypair = nacl.sign.keyPair.fromSeed(new Uint8Array(seedBytes));
+        // Derive proper keypair from mnemonic
+        const keypair = await deriveKeypairFromMnemonic(mnemonic);
+        const pubkey = toBase58(keypair.publicKey);
+        console.log('Derived pubkey:', pubkey);
+        
         const txBytes = Buffer.from(transaction, 'base64');
-        
         console.log('TX first bytes:', txBytes.slice(0, 5).toString('hex'));
-        console.log('TX length:', txBytes.length);
-
-        // Parse and sign the transaction properly
-        // Solana versioned transaction format:
-        // [version_prefix(1)] [num_signatures(compact)] [signatures] [message]
-        // We need to sign the message portion and replace the first signature
         
+        // Sign the transaction
         let signed;
         const firstByte = txBytes[0];
         
         if (firstByte === 0x80) {
-          // Versioned transaction v0
-          // Format: 0x80 | num_sigs | sig1(64) | sig2... | message
+          // Versioned transaction
           const numSigs = txBytes[1];
           const sigStart = 2;
           const msgStart = sigStart + (64 * numSigs);
           const message = txBytes.slice(msgStart);
-          
-          console.log('Versioned tx: numSigs='+numSigs+' msgStart='+msgStart+' msgLen='+message.length);
-          
           const sig = nacl.sign.detached(new Uint8Array(message), keypair.secretKey);
           signed = Buffer.from(txBytes);
           Buffer.from(sig).copy(signed, sigStart);
-          
+          console.log('Versioned tx signed');
         } else {
           // Legacy transaction
-          // Format: [num_sigs(1)] [sig1(64)]... [message]
           const numSigs = firstByte;
           const sigStart = 1;
           const msgStart = sigStart + (64 * numSigs);
           const message = txBytes.slice(msgStart);
-          
-          console.log('Legacy tx: numSigs='+numSigs+' msgStart='+msgStart+' msgLen='+message.length);
-          
           const sig = nacl.sign.detached(new Uint8Array(message), keypair.secretKey);
           signed = Buffer.from(txBytes);
           Buffer.from(sig).copy(signed, sigStart);
+          console.log('Legacy tx signed');
         }
 
         const signedB64 = signed.toString('base64');
         
-        // Try multiple RPC endpoints
-        const rpcs = [
-          'api.mainnet-beta.solana.com',
-          'mainnet.helius-rpc.com'
-        ];
+        const result = await httpsPost('api.mainnet-beta.solana.com', '/', {
+          jsonrpc: '2.0', id: 1,
+          method: 'sendTransaction',
+          params: [signedB64, {
+            encoding: 'base64',
+            skipPreflight: true,
+            maxRetries: 3
+          }]
+        });
         
-        let lastError = '';
-        for (const rpc of rpcs) {
-          try {
-            const result = await httpsPost(rpc, '/', {
-              jsonrpc: '2.0', id: 1,
-              method: 'sendTransaction',
-              params: [signedB64, {
-                encoding: 'base64',
-                skipPreflight: true,
-                maxRetries: 3,
-                preflightCommitment: 'confirmed'
-              }]
-            });
-            
-            console.log('RPC result:', JSON.stringify(result).substring(0, 100));
-            
-            if (result.result) {
-              res.writeHead(200, cors());
-              res.end(JSON.stringify(result));
-              return;
-            }
-            lastError = result.error ? JSON.stringify(result.error) : 'no result';
-          } catch(e) {
-            lastError = e.message;
-          }
-        }
-        
+        console.log('RPC result:', JSON.stringify(result).substring(0, 150));
         res.writeHead(200, cors());
-        res.end(JSON.stringify({ error: lastError }));
+        res.end(JSON.stringify(result));
         return;
       }
 
@@ -220,6 +228,18 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      // Derive pubkey from mnemonic (for verification)
+      if (req.url === '/derivePubkey') {
+        const { mnemonic } = data;
+        if (!mnemonic) throw new Error('No mnemonic');
+        const keypair = await deriveKeypairFromMnemonic(mnemonic);
+        const pubkey = toBase58(keypair.publicKey);
+        console.log('Derived pubkey:', pubkey);
+        res.writeHead(200, cors());
+        res.end(JSON.stringify({ pubkey }));
+        return;
+      }
+
       res.writeHead(404, cors());
       res.end(JSON.stringify({ error: 'Not found' }));
 
@@ -232,5 +252,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log('SOL SENTINEL SERVER v2.0 on port ' + PORT);
+  console.log('SOL SENTINEL SERVER v3.0 on port ' + PORT);
 });

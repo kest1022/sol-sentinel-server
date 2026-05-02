@@ -155,34 +155,48 @@ const server = http.createServer(async (req, res) => {
         console.log('TX first byte:', txBytes[0].toString(16), 'length:', txBytes.length);
 
         let signature;
+        console.log('TX bytes[0]:', txBytes[0], 'hex:', txBytes[0].toString(16));
 
         try {
-          // Try as VersionedTransaction first
+          // Jupiter v1 uses versioned transactions
           const vTx = VersionedTransaction.deserialize(txBytes);
-          console.log('Parsed as VersionedTransaction');
+          console.log('Parsed as VersionedTransaction, version:', vTx.version);
+          console.log('Num signatures needed:', vTx.message.header.numRequiredSignatures);
+          
+          // Sign the transaction
           vTx.sign([keypair]);
+          console.log('Signed successfully');
           
           const connection = new Connection('https://api.mainnet-beta.solana.com', 'confirmed');
-          signature = await connection.sendRawTransaction(vTx.serialize(), {
+          const serialized = vTx.serialize();
+          console.log('Serialized length:', serialized.length);
+          
+          signature = await connection.sendRawTransaction(serialized, {
             skipPreflight: true,
-            maxRetries: 3
+            maxRetries: 5,
+            preflightCommitment: 'confirmed'
           });
-          console.log('VersionedTx sent:', signature);
+          console.log('TX sent! Signature:', signature);
           
         } catch(ve) {
-          console.log('VersionedTx failed:', ve.message, '- trying legacy');
+          console.log('VersionedTx error:', ve.message);
           
-          // Try as legacy Transaction
-          const legacyTx = Transaction.from(txBytes);
-          console.log('Parsed as legacy Transaction');
-          legacyTx.partialSign(keypair);
-          
-          const connection = new Connection('https://api.mainnet-beta.solana.com', 'confirmed');
-          signature = await connection.sendRawTransaction(legacyTx.serialize(), {
-            skipPreflight: true,
-            maxRetries: 3
-          });
-          console.log('LegacyTx sent:', signature);
+          try {
+            // Try legacy
+            const legacyTx = Transaction.from(txBytes);
+            console.log('Parsed as legacy Transaction');
+            legacyTx.partialSign(keypair);
+            
+            const connection = new Connection('https://api.mainnet-beta.solana.com', 'confirmed');
+            signature = await connection.sendRawTransaction(legacyTx.serialize(), {
+              skipPreflight: true,
+              maxRetries: 5
+            });
+            console.log('Legacy TX sent:', signature);
+          } catch(le) {
+            console.log('Legacy TX error:', le.message);
+            throw new Error('Both tx formats failed. Versioned: '+ve.message+' Legacy: '+le.message);
+          }
         }
 
         res.writeHead(200, cors());

@@ -101,7 +101,7 @@ const server = http.createServer(async (req, res) => {
           const message = txBytes.slice(msgStart);
           const sig = nacl.sign.detached(message, keypair.secretKey);
           signed = Buffer.from(txBytes);
-          sig.copy(signed, 2);
+          Buffer.from(sig).copy(signed, 2);
         } else {
           // Legacy transaction
           const numSigs = txBytes[0];
@@ -109,7 +109,7 @@ const server = http.createServer(async (req, res) => {
           const message = txBytes.slice(msgStart);
           const sig = nacl.sign.detached(message, keypair.secretKey);
           signed = Buffer.from(txBytes);
-          sig.copy(signed, 1);
+          Buffer.from(sig).copy(signed, 1);
         }
 
         const result = await httpsPost('api.mainnet-beta.solana.com', '/', {

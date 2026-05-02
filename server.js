@@ -187,13 +187,22 @@ const server = http.createServer(async (req, res) => {
           Buffer.from(sig).copy(signed, sigStart);
         }
 
+        // Get latest blockhash to check expiry
+        const bhResult = await httpsPost('api.mainnet-beta.solana.com', '/', {
+          jsonrpc: '2.0', id: 1,
+          method: 'getLatestBlockhash',
+          params: [{ commitment: 'confirmed' }]
+        });
+        console.log('Blockhash:', bhResult.result ? bhResult.result.value.blockhash.substring(0,16) : 'failed');
+
         const result = await httpsPost('api.mainnet-beta.solana.com', '/', {
           jsonrpc: '2.0', id: 1,
           method: 'sendTransaction',
           params: [signed.toString('base64'), {
             encoding: 'base64',
-            skipPreflight: true,
-            maxRetries: 3
+            skipPreflight: false,
+            preflightCommitment: 'confirmed',
+            maxRetries: 5
           }]
         });
 

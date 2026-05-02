@@ -57,57 +57,34 @@ function cors() {
   };
 }
 
-function toBase58(bytes) {
-  const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-  let digits = [0];
-  for (let i = 0; i < bytes.length; i++) {
-    let carry = bytes[i];
-    for (let j = 0; j < digits.length; j++) {
-      carry += digits[j] << 8;
-      digits[j] = carry % 58;
-      carry = (carry / 58) | 0;
-    }
-    while (carry > 0) { digits.push(carry % 58); carry = (carry / 58) | 0; }
-  }
-  let result = '';
-  for (let k = 0; k < bytes.length && bytes[k] === 0; k++) result += '1';
-  for (let m = digits.length - 1; m >= 0; m--) result += ALPHABET[digits[m]];
-  return result;
-}
-
-async function findKeypair(mnemonic, targetAddress) {
+// Derive keypair using BIP39/BIP44 - tries all common paths
+async function deriveKeypair(mnemonic, targetAddress) {
   const bip39 = require('bip39');
   const { derivePath } = require('ed25519-hd-key');
-  const nacl = require('tweetnacl');
+  const { Keypair } = require('@solana/web3.js');
   
   const seed = await bip39.mnemonicToSeed(mnemonic.trim());
   const seedHex = seed.toString('hex');
   
-  // Try many account indices
-  const paths = [];
+  // Try account indices 0-9 with both path formats
   for (let i = 0; i < 10; i++) {
-    paths.push(`m/44'/501'/${i}'/0'`);
-    paths.push(`m/44'/501'/${i}'`);
+    for (const path of [`m/44'/501'/${i}'/0'`, `m/44'/501'/${i}'`]) {
+      try {
+        const derived = derivePath(path, seedHex);
+        const kp = Keypair.fromSeed(derived.key);
+        const pubkey = kp.publicKey.toBase58();
+        if (pubkey === targetAddress) {
+          console.log('MATCH at path:', path, 'pubkey:', pubkey);
+          return kp;
+        }
+      } catch(e) {}
+    }
   }
   
-  for (const path of paths) {
-    try {
-      const derived = derivePath(path, seedHex);
-      const kp = nacl.sign.keyPair.fromSeed(derived.key);
-      const pubkey = toBase58(kp.publicKey);
-      
-      if (pubkey === targetAddress) {
-        console.log('MATCH at path:', path);
-        return { keypair: kp, path };
-      }
-    } catch(e) {}
-  }
-  
-  console.log('No match found for', targetAddress);
-  // Return default
+  // Default fallback
+  console.log('No match found, using default path');
   const derived = derivePath("m/44'/501'/0'/0'", seedHex);
-  const kp = nacl.sign.keyPair.fromSeed(derived.key);
-  return { keypair: kp, path: "m/44'/501'/0'/0'" };
+  return Keypair.fromSeed(derived.key);
 }
 
 const server = http.createServer(async (req, res) => {
@@ -117,6 +94,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Quote proxy
   if (req.method === 'GET' && req.url.startsWith('/quote')) {
     try {
       const params = req.url.replace('/quote', '');
@@ -130,6 +108,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Price proxy
   if (req.method === 'GET' && req.url.startsWith('/price')) {
     try {
       const params = req.url.replace('/price', '');
@@ -143,9 +122,10 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Health check
   if (req.method === 'GET') {
     res.writeHead(200, cors());
-    res.end(JSON.stringify({ status: 'SOL SENTINEL SERVER ONLINE', version: '5.0' }));
+    res.end(JSON.stringify({ status: 'SOL SENTINEL SERVER ONLINE', version: '6.0' }));
     return;
   }
 
@@ -155,63 +135,62 @@ const server = http.createServer(async (req, res) => {
     try {
       const data = JSON.parse(body || '{}');
 
+      // Sign and broadcast using @solana/web3.js
       if (req.url === '/broadcast') {
         const { transaction, mnemonic, address } = data;
         if (!transaction) throw new Error('No transaction');
         if (!mnemonic) throw new Error('No mnemonic');
 
-        const nacl = require('tweetnacl');
-        const { keypair, path } = await findKeypair(mnemonic, address);
-        const pubkey = toBase58(keypair.publicKey);
-        console.log('Path:', path, 'match:', pubkey === address);
-
-        const txBytes = Buffer.from(transaction, 'base64');
-        let signed;
-        const firstByte = txBytes[0];
+        const solanaWeb3 = require('@solana/web3.js');
+        const { VersionedTransaction, Transaction, Connection } = solanaWeb3;
         
-        if (firstByte === 0x80) {
-          const numSigs = txBytes[1];
-          const sigStart = 2;
-          const msgStart = sigStart + (64 * numSigs);
-          const message = txBytes.slice(msgStart);
-          const sig = nacl.sign.detached(new Uint8Array(message), keypair.secretKey);
-          signed = Buffer.from(txBytes);
-          Buffer.from(sig).copy(signed, sigStart);
-        } else {
-          const numSigs = firstByte;
-          const sigStart = 1;
-          const msgStart = sigStart + (64 * numSigs);
-          const message = txBytes.slice(msgStart);
-          const sig = nacl.sign.detached(new Uint8Array(message), keypair.secretKey);
-          signed = Buffer.from(txBytes);
-          Buffer.from(sig).copy(signed, sigStart);
+        // Get keypair
+        const keypair = await deriveKeypair(mnemonic, address);
+        console.log('Using pubkey:', keypair.publicKey.toBase58());
+        console.log('Target address:', address);
+        console.log('Match:', keypair.publicKey.toBase58() === address);
+
+        // Decode transaction
+        const txBytes = Buffer.from(transaction, 'base64');
+        console.log('TX first byte:', txBytes[0].toString(16), 'length:', txBytes.length);
+
+        let signature;
+
+        try {
+          // Try as VersionedTransaction first
+          const vTx = VersionedTransaction.deserialize(txBytes);
+          console.log('Parsed as VersionedTransaction');
+          vTx.sign([keypair]);
+          
+          const connection = new Connection('https://api.mainnet-beta.solana.com', 'confirmed');
+          signature = await connection.sendRawTransaction(vTx.serialize(), {
+            skipPreflight: true,
+            maxRetries: 3
+          });
+          console.log('VersionedTx sent:', signature);
+          
+        } catch(ve) {
+          console.log('VersionedTx failed:', ve.message, '- trying legacy');
+          
+          // Try as legacy Transaction
+          const legacyTx = Transaction.from(txBytes);
+          console.log('Parsed as legacy Transaction');
+          legacyTx.partialSign(keypair);
+          
+          const connection = new Connection('https://api.mainnet-beta.solana.com', 'confirmed');
+          signature = await connection.sendRawTransaction(legacyTx.serialize(), {
+            skipPreflight: true,
+            maxRetries: 3
+          });
+          console.log('LegacyTx sent:', signature);
         }
 
-        // Get latest blockhash to check expiry
-        const bhResult = await httpsPost('api.mainnet-beta.solana.com', '/', {
-          jsonrpc: '2.0', id: 1,
-          method: 'getLatestBlockhash',
-          params: [{ commitment: 'confirmed' }]
-        });
-        console.log('Blockhash:', bhResult.result ? bhResult.result.value.blockhash.substring(0,16) : 'failed');
-
-        const result = await httpsPost('api.mainnet-beta.solana.com', '/', {
-          jsonrpc: '2.0', id: 1,
-          method: 'sendTransaction',
-          params: [signed.toString('base64'), {
-            encoding: 'base64',
-            skipPreflight: false,
-            preflightCommitment: 'confirmed',
-            maxRetries: 5
-          }]
-        });
-
-        console.log('RPC:', JSON.stringify(result).substring(0, 100));
         res.writeHead(200, cors());
-        res.end(JSON.stringify(result));
+        res.end(JSON.stringify({ result: signature }));
         return;
       }
 
+      // Swap proxy
       if (req.url === '/swap') {
         const result = await httpsPost('lite-api.jup.ag', '/swap/v1/swap', data);
         res.writeHead(200, cors());
@@ -219,6 +198,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      // Balance fetch
       if (req.url === '/balance') {
         const { address } = data;
         const result = await httpsPost('api.mainnet-beta.solana.com', '/', {
@@ -231,21 +211,11 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // Find which path matches address
-      if (req.url === '/findPath') {
-        const { mnemonic, address } = data;
-        const { keypair, path } = await findKeypair(mnemonic, address);
-        const pubkey = toBase58(keypair.publicKey);
-        res.writeHead(200, cors());
-        res.end(JSON.stringify({ pubkey, path, match: pubkey === address }));
-        return;
-      }
-
       res.writeHead(404, cors());
       res.end(JSON.stringify({ error: 'Not found' }));
 
     } catch(e) {
-      console.error('Error:', e.message);
+      console.error('Server error:', e.message);
       res.writeHead(500, cors());
       res.end(JSON.stringify({ error: e.message }));
     }
@@ -253,5 +223,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log('SOL SENTINEL SERVER v5.0 on port ' + PORT);
+  console.log('SOL SENTINEL SERVER v6.0 on port ' + PORT);
 });

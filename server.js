@@ -237,6 +237,59 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      // SOL transfer - for vault withdrawals
+      if (req.url === '/transfer') {
+        const { mnemonic, from, to, lamports } = data;
+        if (!mnemonic || !to || !lamports) throw new Error('Need mnemonic, to, lamports');
+        
+        const { Keypair, Transaction, SystemProgram, Connection, PublicKey, LAMPORTS_PER_SOL } = require('@solana/web3.js');
+        const bip39 = require('bip39');
+        const { derivePath } = require('ed25519-hd-key');
+        
+        const seed = await bip39.mnemonicToSeed(mnemonic.trim());
+        const seedHex = seed.toString('hex');
+        
+        // Find correct keypair
+        let keypair = null;
+        for (let i = 0; i < 10; i++) {
+          for (const path of [`m/44'/501'/${i}'/0'`, `m/44'/501'/${i}'`]) {
+            try {
+              const derived = derivePath(path, seedHex);
+              const kp = Keypair.fromSeed(derived.key);
+              if (kp.publicKey.toBase58() === from) {
+                keypair = kp;
+                console.log('Transfer keypair found at:', path);
+                break;
+              }
+            } catch(e) {}
+          }
+          if (keypair) break;
+        }
+        
+        if (!keypair) throw new Error('Keypair not found for address');
+        
+        const connection = new Connection('https://api.mainnet-beta.solana.com', 'confirmed');
+        const tx = new Transaction().add(
+          SystemProgram.transfer({
+            fromPubkey: keypair.publicKey,
+            toPubkey: new PublicKey(to),
+            lamports: parseInt(lamports)
+          })
+        );
+        
+        const { blockhash } = await connection.getLatestBlockhash();
+        tx.recentBlockhash = blockhash;
+        tx.feePayer = keypair.publicKey;
+        tx.sign(keypair);
+        
+        const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
+        console.log('Transfer sent:', sig);
+        
+        res.writeHead(200, cors());
+        res.end(JSON.stringify({ result: sig }));
+        return;
+      }
+
       res.writeHead(404, cors());
       res.end(JSON.stringify({ error: 'Not found' }));
 
